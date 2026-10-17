@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMAP Mobileconfig Generator</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  fieldset { border: 1px solid #8884; border-radius: 6px; margin: 0 0 1rem; }
+  label { display: block; margin: .5rem 0; }
+  label > span { display: block; font-size: .85rem; opacity: .8; }
+  input[type=text], input[type=email], input[type=password], input[type=number] { width: 100%; box-sizing: border-box; padding: .4rem; }
+  .row { display: flex; gap: .75rem; align-items: end; }
+  .row > :first-child { flex: 1; }
+  .row input[type=number] { width: 6rem; }
+  .check { display: flex; gap: .4rem; align-items: center; }
+  button { padding: .6rem 1.2rem; font-size: 1rem; }
+  small { opacity: .7; }
+</style>
+</head>
+<body>
+<h1>IMAP Mobileconfig Generator</h1>
+<p><small>Generates an Apple configuration profile (.mobileconfig) that adds an IMAP mail account on iOS, iPadOS or macOS. Everything runs in your browser; nothing is sent anywhere.</small></p>
+
+<form id="f">
+  <fieldset>
+    <legend>Account</legend>
+    <label><span>Your name</span><input type="text" name="fullName" required placeholder="Jane Doe"></label>
+    <label><span>Email address</span><input type="email" name="email" required placeholder="jane@example.com"></label>
+    <label><span>Account description</span><input type="text" name="description" placeholder="Work Mail"></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Incoming (IMAP)</legend>
+    <div class="row">
+      <label><span>Server</span><input type="text" name="inHost" required placeholder="imap.example.com"></label>
+      <label><span>Port</span><input type="number" name="inPort" value="993" min="1" max="65535" required></label>
+    </div>
+    <label class="check"><input type="checkbox" name="inSSL" checked> Use SSL</label>
+    <label><span>Username (defaults to email)</span><input type="text" name="inUser"></label>
+    <label><span>Password (optional — leave blank to be prompted on install)</span><input type="password" name="inPass" autocomplete="new-password"></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Outgoing (SMTP)</legend>
+    <div class="row">
+      <label><span>Server</span><input type="text" name="outHost" required placeholder="smtp.example.com"></label>
+      <label><span>Port</span><input type="number" name="outPort" value="587" min="1" max="65535" required></label>
+    </div>
+    <label class="check"><input type="checkbox" name="outSSL" checked> Use SSL</label>
+    <label class="check"><input type="checkbox" name="sameCreds" checked> Same username and password as incoming</label>
+    <div id="outCreds" hidden>
+      <label><span>Username</span><input type="text" name="outUser"></label>
+      <label><span>Password (optional)</span><input type="password" name="outPass" autocomplete="new-password"></label>
+    </div>
+  </fieldset>
+
+  <button type="submit">Download .mobileconfig</button>
+  <p><small>Note: the profile is unsigned and any password you enter is stored in it as plain text. Share the file carefully.</small></p>
+</form>
+
+<script>
+const form = document.getElementById('f');
+const outCreds = document.getElementById('outCreds');
+form.sameCreds.addEventListener('change', () => { outCreds.hidden = form.sameCreds.checked; });
+
+// ?server=mail.example.com presets both the IMAP and SMTP hosts
+const presetServer = (new URLSearchParams(location.search).get('server') || '').trim();
+if (presetServer) {
+  form.inHost.value = presetServer;
+  form.outHost.value = presetServer;
+}
+
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const uuid = () => crypto.randomUUID ? crypto.randomUUID().toUpperCase()
+  : ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+      (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)).toUpperCase();
+
+function plist(value, indent) {
+  const pad = '\t'.repeat(indent);
+  if (Array.isArray(value)) {
+    return `${pad}<array>\n${value.map(v => plist(v, indent + 1)).join('')}${pad}</array>\n`;
+  }
+  if (typeof value === 'object') {
+    let out = `${pad}<dict>\n`;
+    for (const [k, v] of Object.entries(value)) {
+      if (v === undefined) continue;
+      out += `${pad}\t<key>${esc(k)}</key>\n${plist(v, indent + 1)}`;
+    }
+    return out + `${pad}</dict>\n`;
+  }
+  if (typeof value === 'boolean') return `${pad}<${value}/>\n`;
+  if (typeof value === 'number') return `${pad}<integer>${value}</integer>\n`;
+  return `${pad}<string>${esc(value)}</string>\n`;
+}
+
+function buildProfile(d) {
+  const domain = d.email.split('@')[1] || 'example.com';
+  const reverse = domain.split('.').reverse().join('.');
+  const id = `${reverse}.mail.${d.email.split('@')[0].replace(/[^A-Za-z0-9-]/g, '-')}`;
+  const description = d.description || d.email;
+  const inUser = d.inUser || d.email;
+  const outUser = d.sameCreds ? inUser : (d.outUser || d.email);
+
+  const payload = {
+    EmailAccountDescription: description,
+    EmailAccountName: d.name,
+    EmailAccountType: 'EmailTypeIMAP',
+    EmailAddress: d.email,
+    IncomingMailServerAuthentication: 'EmailAuthPassword',
+    IncomingMailServerHostName: d.inHost,
+    IncomingMailServerPortNumber: d.inPort,
+    IncomingMailServerUseSSL: d.inSSL,
+    IncomingMailServerUsername: inUser,
+    IncomingPassword: d.inPass || undefined,
+    OutgoingMailServerAuthentication: 'EmailAuthPassword',
+    OutgoingMailServerHostName: d.outHost,
+    OutgoingMailServerPortNumber: d.outPort,
+    OutgoingMailServerUseSSL: d.outSSL,
+    OutgoingMailServerUsername: outUser,
+    OutgoingPassword: d.sameCreds ? undefined : (d.outPass || undefined),
+    OutgoingPasswordSameAsIncomingPassword: d.sameCreds,
+    PayloadDescription: `Configures the ${d.email} email account`,
+    PayloadDisplayName: description,
+    PayloadIdentifier: `${id}.account`,
+    PayloadType: 'com.apple.mail.managed',
+    PayloadUUID: uuid(),
+    PayloadVersion: 1,
+  };
+
+  const profile = {
+    PayloadContent: [payload],
+    PayloadDescription: `Adds the ${d.email} IMAP email account`,
+    PayloadDisplayName: `${description} (Email)`,
+    PayloadIdentifier: id,
+    PayloadRemovalDisallowed: false,
+    PayloadType: 'Configuration',
+    PayloadUUID: uuid(),
+    PayloadVersion: 1,
+  };
+
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n' +
+    '<plist version="1.0">\n' + plist(profile, 0) + '</plist>\n';
+}
+
+form.addEventListener('submit', e => {
+  e.preventDefault();
+  const f = form.elements;
+  const d = {
+    name: f.fullName.value.trim(),
+    email: f.email.value.trim(),
+    description: f.description.value.trim(),
+    inHost: f.inHost.value.trim(),
+    inPort: parseInt(f.inPort.value, 10),
+    inSSL: f.inSSL.checked,
+    inUser: f.inUser.value.trim(),
+    inPass: f.inPass.value,
+    outHost: f.outHost.value.trim(),
+    outPort: parseInt(f.outPort.value, 10),
+    outSSL: f.outSSL.checked,
+    sameCreds: f.sameCreds.checked,
+    outUser: f.outUser.value.trim(),
+    outPass: f.outPass.value,
+  };
+  const blob = new Blob([buildProfile(d)], { type: 'application/x-apple-aspen-config' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${d.email.replace(/[^A-Za-z0-9@._-]/g, '_')}.mobileconfig`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+</script>
+</body>
+</html>
